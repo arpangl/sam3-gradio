@@ -39,45 +39,61 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"使用设备: {DEVICE}")
 
 # 初始化模型
+MODELS_READY = False
+MODEL_STATUS_MESSAGE = ""
+
+
 def initialize_models():
     """初始化SAM3图像和视频预测器"""
+    global MODELS_READY, MODEL_STATUS_MESSAGE
     try:
         # 检查模型文件是否存在
         model_dir = current_dir / "models"
         checkpoint_path = model_dir / "sam3.pt"
         bpe_path = current_dir / "assets" / "bpe_simple_vocab_16e6.txt.gz"
-        
+
+        missing_items = []
         if not checkpoint_path.exists():
-            print(f"模型文件不存在: {checkpoint_path}")
-            print("请下载SAM3模型文件到目录")
-            return None, None
-            
+            missing_items.append(str(checkpoint_path))
         if not bpe_path.exists():
-            print(f"BPE文件不存在: {bpe_path}")
+            missing_items.append(str(bpe_path))
+
+        if missing_items:
+            MODEL_STATUS_MESSAGE = (
+                "⚠️ 模型文件缺失。请运行 `python download_models.py` 下载以下文件后再启用推理:\n" +
+                "\n".join(f"- {item}" for item in missing_items)
+            )
+            print(MODEL_STATUS_MESSAGE)
+            MODELS_READY = False
             return None, None
-            
+
         # 初始化图像模型
         image_model = build_sam3_image_model(
             checkpoint_path=str(checkpoint_path),
             bpe_path=str(bpe_path),
             device=DEVICE
         )
-        
+
         # 创建图像处理器
         image_predictor = Sam3Processor(image_model, device=DEVICE)
-        
+
         # 初始化视频预测器
         video_predictor = Sam3VideoPredictor(
             checkpoint_path=str(checkpoint_path),
             bpe_path=str(bpe_path)
         )
-        
-        print("模型初始化成功")
+
+        MODELS_READY = True
+        MODEL_STATUS_MESSAGE = "✅ 模型初始化成功，推理功能可用。"
+        print(MODEL_STATUS_MESSAGE)
         return image_predictor, video_predictor
-        
+
     except Exception as e:
-        print(f"模型初始化失败: {e}")
+        MODEL_STATUS_MESSAGE = f"模型初始化失败: {e}"
+        print(MODEL_STATUS_MESSAGE)
+        MODELS_READY = False
         return None, None
+
 
 # 全局预测器实例
 image_predictor, video_predictor = initialize_models()
@@ -441,15 +457,28 @@ def create_demo():
         font=[gr.themes.GoogleFont('Inter'), 'ui-sans-serif', 'system-ui', 'sans-serif']
     )
 
+    image_inference_available = image_predictor is not None
+    video_inference_available = video_predictor is not None
+    inference_notice = MODEL_STATUS_MESSAGE or "✅ 模型初始化成功，推理功能可用。"
+
     with gr.Blocks(theme=theme, css=custom_css, title="SAM3 交互式视觉工作台") as demo:
-        
+
         with gr.Column(elem_classes="container"):
             gr.Markdown("# 👁️ SAM3 交互式视觉工作台")
             gr.Markdown("基于 SAM3 的下一代图像分割与视频跟踪系统", elem_classes="description")
+            gr.Markdown(
+                inference_notice,
+                elem_classes="description",
+            )
             
             with gr.Tabs():
                 # ================= 图像分割标签页 =================
                 with gr.TabItem("🖼️ 智能图像分割", id="tab_image"):
+                    if not image_inference_available:
+                        gr.Markdown(
+                            "⚠️ 检测到模型文件缺失，图像分割推理已暂时禁用。请运行 `python download_models.py` 下载模型后再试。",
+                            elem_classes="description",
+                        )
                     with gr.Row():
                         # 左侧控制栏
                         with gr.Column(scale=1):
@@ -495,13 +524,23 @@ def create_demo():
                                 minimum=0.0, maximum=1.0, value=0.4, step=0.05,
                                 label="🎯 置信度阈值 (Confidence)"
                             )
-                            
-                            segment_button = gr.Button("🚀 开始分割 (Segment)", variant="primary", size="lg")
+
+                            segment_button = gr.Button(
+                                "🚀 开始分割 (Segment)",
+                                variant="primary",
+                                size="lg",
+                                interactive=image_inference_available,
+                            )
                             
                         # 右侧结果栏
                         with gr.Column(scale=1):
                             image_output = gr.Image(type="numpy", label="✨ 分割结果")
-                            image_info = gr.Textbox(label="📊 分析报告", interactive=False, lines=2)
+                            image_info = gr.Textbox(
+                                label="📊 分析报告",
+                                interactive=False,
+                                lines=2,
+                                value=None if image_inference_available else "⚠️ 模型不可用，推理按钮已禁用。",
+                            )
                     
                     # 事件绑定
                     
@@ -539,6 +578,11 @@ def create_demo():
 
                 # ================= 视频跟踪标签页 =================
                 with gr.TabItem("🎬 视频目标跟踪", id="tab_video"):
+                    if not video_inference_available:
+                        gr.Markdown(
+                            "⚠️ 检测到模型文件缺失，视频跟踪推理已暂时禁用。请运行 `python download_models.py` 下载模型后再试。",
+                            elem_classes="description",
+                        )
                     with gr.Row():
                         with gr.Column(scale=1):
                             video_input = gr.Video(label="📂 上传视频文件")
@@ -554,11 +598,20 @@ def create_demo():
                                     label="🎯 跟踪置信度"
                                 )
                             
-                            process_button = gr.Button("▶️ 开始跟踪处理", variant="primary", size="lg")
+                            process_button = gr.Button(
+                                "▶️ 开始跟踪处理",
+                                variant="primary",
+                                size="lg",
+                                interactive=video_inference_available,
+                            )
                             
                         with gr.Column(scale=1):
                             video_output = gr.Video(label="✨ 跟踪结果")
-                            video_info = gr.Textbox(label="📊 处理报告", interactive=False)
+                            video_info = gr.Textbox(
+                                label="📊 处理报告",
+                                interactive=False,
+                                value=None if video_inference_available else "⚠️ 模型不可用，推理按钮已禁用。",
+                            )
                     
                     process_button.click(
                         fn=process_video,
@@ -583,25 +636,18 @@ def main():
     if not model_dir.exists():
         print(f"创建模型目录: {model_dir}")
         model_dir.mkdir(exist_ok=True)
-        
+
     checkpoint_path = model_dir / "sam3.pt"
     bpe_path = current_dir / "assets" / "bpe_simple_vocab_16e6.txt.gz"
-    
-    if not checkpoint_path.exists() or not bpe_path.exists():
-        print("⚠️ 模型文件缺失")
-        print(f"请确保以下文件存在:\n1. {checkpoint_path}\n2. {bpe_path}")
-        
-        response = input("是否尝试自动下载模型文件？(y/n): ").lower().strip()
-        if response == 'y':
-            try:
-                import download_models
-                download_models.main()
-            except Exception as e:
-                print(f"自动下载失败: {e}")
-                return
-        else:
-            return
-    
+
+    missing_items = [path for path in [checkpoint_path, bpe_path] if not path.exists()]
+    if missing_items:
+        print("⚠️ 检测到模型文件缺失，Gradio 界面将以禁用推理模式启动。")
+        print("缺失的文件:")
+        for item in missing_items:
+            print(f"- {item}")
+        print("请运行 `python download_models.py` 下载所需文件后重新启用推理功能。")
+
     print("🚀 正在启动 SAM3 交互式视觉工作台...")
     demo = create_demo()
     demo.launch(
