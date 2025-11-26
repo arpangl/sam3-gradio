@@ -4,6 +4,7 @@ SAM3 Interactive Vision Studio
 English-only interactive image segmentation demo for SAM3.
 """
 
+import io
 import os
 import sys
 import tempfile
@@ -177,17 +178,29 @@ def segment_image(
     """Perform image segmentation and return preview plus mask package."""
     image_to_process = original_image if original_image is not None else input_image
 
-    empty_response = (None, None, None, None, None)
+    empty_response = (None, "Please upload an image.", None, None, None)
 
     if image_to_process is None:
         return empty_response
 
     if not text_prompt and not point_prompt and not box_prompt:
-        return empty_response
+        return (
+            None,
+            "Provide at least one prompt (text, point, or box).",
+            None,
+            None,
+            None,
+        )
 
     try:
         if image_predictor is None:
-            return empty_response
+            return (
+                None,
+                "Model is not available. Upload assets to enable segmentation.",
+                None,
+                None,
+                None,
+            )
 
         start_time = time.time()
         progress(0.1, desc="Loading image...")
@@ -266,100 +279,68 @@ def segment_image(
                 scores,
                 time.time() - start_time,
             )
+
+            fd, output_path = tempfile.mkstemp(suffix=".png")
+            os.close(fd)
+            result_image.save(output_path)
+
+            detection_rows = []
+            if "scores" in state and "boxes" in state:
+                scores = state["scores"].detach().cpu().numpy()
+                boxes_np = state["boxes"].detach().cpu().numpy()
+                for idx, (score, box) in enumerate(zip(scores, boxes_np)):
+                    x1, y1, x2, y2 = box
+                    label = text_prompt or f"Object {idx + 1}"
+                    detection_rows.append(
+                        [idx + 1, label, round(float(score), 3), f"{int(x1)},{int(y1)},{int(x2)},{int(y2)}"]
+                    )
+
+            segmentation_zip = None
+            if "masks" in state:
+                masks = state["masks"].detach().cpu().numpy()
+                boxes_np = state["boxes"].detach().cpu().numpy()
+                scores = state["scores"].detach().cpu().numpy()
+                temp_dir = Path(tempfile.mkdtemp(prefix="sam3_masks_"))
+                manifest = []
+                for idx, (mask, box, score) in enumerate(zip(masks, boxes_np, scores)):
+                    mask_array = (mask.squeeze() * 255).astype(np.uint8)
+                    mask_image = Image.fromarray(mask_array)
+                    mask_path = temp_dir / f"mask_{idx + 1}.png"
+                    mask_image.save(mask_path)
+                    manifest.append(
+                        {
+                            "id": idx + 1,
+                            "label": text_prompt or f"Object {idx + 1}",
+                            "score": float(score),
+                            "box": [float(x) for x in box.tolist()],
+                            "mask": mask_path.name,
+                        }
+                    )
+
+                manifest_path = temp_dir / "manifest.json"
+                with open(manifest_path, "w", encoding="utf-8") as mf:
+                    import json
+
+                    json.dump({"instances": manifest}, mf, indent=2)
+
+                zip_fd, zip_path = tempfile.mkstemp(suffix=".zip")
+                os.close(zip_fd)
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for file_path in temp_dir.iterdir():
+                        zf.write(file_path, arcname=file_path.name)
+                segmentation_zip = zip_path
+
+            return result_image, info, output_path, detection_rows, segmentation_zip
         else:
             return (
                 image,
                 None,
+                [],
                 None,
-                None,
-                time.time() - start_time,
             )
 
     except Exception as e:
-        return None, None, None, None, None
-
-
-def render_overlays(base_image, detections):
-    """Render existing detections onto the base image without axes/borders."""
-    if base_image is None:
-        return None
-
-    if isinstance(base_image, np.ndarray):
-        canvas = base_image.copy()
-    else:
-        canvas = np.array(base_image.convert("RGB"))
-
-    overlay = canvas.copy()
-    for det in detections:
-        color = det.get("color", (0, 255, 0))
-        cv2_color = (color[2], color[1], color[0]) if len(color) == 3 else color
-        mask = det.get("mask")
-        box = det.get("box")
-
-        if mask is not None:
-            if mask.dtype != np.bool_:
-                mask = mask.astype(bool)
-            overlay[mask] = (0.5 * np.array(color) + 0.5 * overlay[mask]).astype(np.uint8)
-            canvas = np.where(mask[..., None], overlay, canvas)
-
-        if box is not None and len(box) == 4:
-            x1, y1, x2, y2 = map(int, box)
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), cv2_color, 2)
-
-    return Image.fromarray(canvas)
-
-
-def build_detection_rows(detections):
-    rows = []
-    for det in detections:
-        rows.append(
-            [
-                det.get("id"),
-                det.get("label"),
-                round(float(det.get("score", 0.0)), 3),
-                ",".join(str(int(v)) for v in det.get("box", [])),
-            ]
-        )
-    return rows
-
-
-def build_segmentation_package(detections):
-    if not detections:
-        return None
-
-    temp_dir = Path(tempfile.mkdtemp(prefix="sam3_masks_"))
-    manifest = []
-    for det in detections:
-        mask = det.get("mask")
-        if mask is None:
-            continue
-        mask_array = (mask.astype(np.uint8) * 255).squeeze()
-        mask_image = Image.fromarray(mask_array)
-        mask_path = temp_dir / f"mask_{det['id']}.png"
-        mask_image.save(mask_path)
-        manifest.append(
-            {
-                "id": det.get("id"),
-                "label": det.get("label"),
-                "score": float(det.get("score", 0.0)),
-                "box": [float(x) for x in det.get("box", [])],
-                "mask": mask_path.name,
-            }
-        )
-
-    manifest_path = temp_dir / "manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as mf:
-        import json
-
-        json.dump({"instances": manifest}, mf, indent=2)
-
-    zip_fd, zip_path = tempfile.mkstemp(suffix=".zip")
-    os.close(zip_fd)
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_path in temp_dir.iterdir():
-            zf.write(file_path, arcname=file_path.name)
-
-    return zip_path
+        return None, f"❌ Processing failed: {str(e)}", None, [], None
 
 
 def create_demo():
@@ -398,15 +379,10 @@ def create_demo():
 
             with gr.Tabs():
                 with gr.TabItem("🖼️ Image Segmentation", id="tab_image"):
-                    original_image_state = gr.State(None)
-                    click_state = gr.State(None)
-                    detections_state = gr.State([])
-                    next_id_state = gr.State(1)
-
                     with gr.Row(elem_classes="main-row"):
-                        with gr.Column(scale=1.4, elem_classes="seg-card"):
-                            gr.Markdown("### 圖片與提示")
-                            image_canvas = gr.Image(
+                        with gr.Column(scale=0.95, elem_classes="control-card"):
+                            gr.Markdown("### Upload & prompts")
+                            image_input = gr.Image(
                                 type="numpy",
                                 label="Upload, click to prompt, and view results",
                                 elem_id="input_image",
@@ -421,10 +397,11 @@ def create_demo():
                                 label="📊 Result summary", interactive=False, lines=2
                             )
 
-                        with gr.Column(scale=0.9, elem_classes="control-card"):
-                            gr.Markdown("### 控制")
+                            original_image_state = gr.State(None)
+                            click_state = gr.State(None)
+
                             with gr.Accordion(
-                                "🎛️ Prompt & threshold settings", open=True, elem_classes="accordion-compact"
+                                "🎛️ Prompt & threshold settings", open=False, elem_classes="accordion-compact"
                             ):
                                 interaction_mode = gr.Radio(
                                     choices=["📍 Point Prompt", "🔲 Box Prompt"],
@@ -440,6 +417,7 @@ def create_demo():
                                     label="🎯 Confidence threshold",
                                 )
 
+                            with gr.Accordion("📝 Advanced prompt options", open=False):
                                 text_prompt = gr.Textbox(
                                     label="Text prompt",
                                     placeholder="Describe what to segment, e.g., 'a red car' or 'a cat'",
@@ -462,16 +440,16 @@ def create_demo():
                                     "🗑️ Reset", size="sm", variant="secondary"
                                 )
 
+                            interaction_info = gr.Markdown(
+                                "👆 Click the image to add points or box corners.",
+                                elem_id="interaction-info",
+                            )
+
                             with gr.Accordion("📦 Detected objects", open=True):
                                 detected_objects = gr.Dataframe(
                                     headers=["ID", "Name", "Confidence", "Box (x1,y1,x2,y2)"],
                                     value=[],
                                 )
-                                with gr.Row():
-                                    detection_selector = gr.Dropdown(
-                                        label="Select detection to delete", choices=[], value=None
-                                    )
-                                    delete_detection_btn = gr.Button("❌ Delete", size="sm")
 
                             with gr.Accordion("📥 Downloads", open=True):
                                 download_output = gr.File(label="Segmentation preview (PNG)")
@@ -479,6 +457,14 @@ def create_demo():
                                     label="Segmentation package (ZIP of masks)",
                                     file_types=[".zip"],
                                 )
+
+                        with gr.Column(scale=1.55, elem_classes="seg-card"):
+                            image_output = gr.Image(
+                                type="numpy", label="✨ Segmentation preview", height=650
+                            )
+                            image_info = gr.Textbox(
+                                label="📊 Result summary", interactive=False, lines=2
+                            )
 
                     def store_original_image(img):
                         if img is None:
@@ -790,6 +776,13 @@ def create_demo():
                             segmentation_package,
                             download_output,
                             interaction_info,
+                        ],
+                        outputs=[
+                            image_output,
+                            image_info,
+                            download_output,
+                            detected_objects,
+                            segmentation_package,
                         ],
                     )
 
