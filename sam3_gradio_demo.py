@@ -423,7 +423,7 @@ def create_demo():
     
     # 自定义CSS
     custom_css = """
-    .container { max-width: 1200px; margin: auto; padding-top: 20px; }
+    .container { max-width: 1400px; width: 100%; margin: auto; padding-top: 20px; }
     h1 { text-align: center; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2d3748; margin-bottom: 10px; }
     .description { text-align: center; font-size: 1.1em; color: #4a5568; margin-bottom: 30px; }
     .gr-button-primary { background: linear-gradient(90deg, #4b6cb7 0%, #182848 100%); border: none; }
@@ -452,7 +452,7 @@ def create_demo():
                 with gr.TabItem("🖼️ 智能图像分割", id="tab_image"):
                     with gr.Row():
                         # 左侧控制栏
-                        with gr.Column(scale=1):
+                        with gr.Column(scale=5):
                             image_input = gr.Image(type="numpy", label="原始图像 (点击进行交互)", elem_id="input_image")
                             
                             # 存储原始图像状态
@@ -499,7 +499,7 @@ def create_demo():
                             segment_button = gr.Button("🚀 开始分割 (Segment)", variant="primary", size="lg")
                             
                         # 右侧结果栏
-                        with gr.Column(scale=1):
+                        with gr.Column(scale=7):
                             image_output = gr.Image(type="numpy", label="✨ 分割结果")
                             image_info = gr.Textbox(label="📊 分析报告", interactive=False, lines=2)
                     
