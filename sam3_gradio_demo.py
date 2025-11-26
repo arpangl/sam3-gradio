@@ -776,14 +776,7 @@ def create_demo():
                             segmentation_package,
                             download_output,
                             interaction_info,
-                        ],
-                        outputs=[
-                            image_output,
-                            image_info,
-                            download_output,
-                            detected_objects,
-                            segmentation_package,
-                        ],
+                        ]
                     )
 
                     example_text_btn.click(fn=lambda: "a cat", outputs=[text_prompt])
