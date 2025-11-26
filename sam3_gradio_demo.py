@@ -4,17 +4,19 @@ SAM3 Interactive Vision Studio
 English-only interactive image segmentation demo for SAM3.
 """
 
+import io
 import os
 import sys
+import tempfile
 import time
-import io
+import zipfile
+from pathlib import Path
+
+import cv2
+import gradio as gr
 import numpy as np
 import torch
-import gradio as gr
 from PIL import Image
-import cv2
-from pathlib import Path
-import tempfile
 import importlib.util
 
 # Add current directory to Python path so sam3 modules can be imported
@@ -157,18 +159,32 @@ def segment_image(
     original_image=None,
     progress=gr.Progress(),
 ):
-    """Perform image segmentation."""
+    """Perform image segmentation and return preview plus mask package."""
     image_to_process = original_image if original_image is not None else input_image
 
+    empty_response = (None, "Please upload an image.", None, None, None)
+
     if image_to_process is None:
-        return None, "Please upload an image.", None
+        return empty_response
 
     if not text_prompt and not point_prompt and not box_prompt:
-        return None, "Provide at least one prompt (text, point, or box).", None
+        return (
+            None,
+            "Provide at least one prompt (text, point, or box).",
+            None,
+            None,
+            None,
+        )
 
     try:
         if image_predictor is None:
-            return None, "Model is not available. Upload assets to enable segmentation.", None
+            return (
+                None,
+                "Model is not available. Upload assets to enable segmentation.",
+                None,
+                None,
+                None,
+            )
 
         start_time = time.time()
         progress(0.1, desc="Loading image...")
@@ -255,29 +271,81 @@ def segment_image(
             os.close(fd)
             result_image.save(output_path)
 
-            return result_image, info, output_path
+            detection_rows = []
+            if "scores" in state and "boxes" in state:
+                scores = state["scores"].detach().cpu().numpy()
+                boxes_np = state["boxes"].detach().cpu().numpy()
+                for idx, (score, box) in enumerate(zip(scores, boxes_np)):
+                    x1, y1, x2, y2 = box
+                    label = text_prompt or f"Object {idx + 1}"
+                    detection_rows.append(
+                        [idx + 1, label, round(float(score), 3), f"{int(x1)},{int(y1)},{int(x2)},{int(y2)}"]
+                    )
+
+            segmentation_zip = None
+            if "masks" in state:
+                masks = state["masks"].detach().cpu().numpy()
+                boxes_np = state["boxes"].detach().cpu().numpy()
+                scores = state["scores"].detach().cpu().numpy()
+                temp_dir = Path(tempfile.mkdtemp(prefix="sam3_masks_"))
+                manifest = []
+                for idx, (mask, box, score) in enumerate(zip(masks, boxes_np, scores)):
+                    mask_array = (mask.squeeze() * 255).astype(np.uint8)
+                    mask_image = Image.fromarray(mask_array)
+                    mask_path = temp_dir / f"mask_{idx + 1}.png"
+                    mask_image.save(mask_path)
+                    manifest.append(
+                        {
+                            "id": idx + 1,
+                            "label": text_prompt or f"Object {idx + 1}",
+                            "score": float(score),
+                            "box": [float(x) for x in box.tolist()],
+                            "mask": mask_path.name,
+                        }
+                    )
+
+                manifest_path = temp_dir / "manifest.json"
+                with open(manifest_path, "w", encoding="utf-8") as mf:
+                    import json
+
+                    json.dump({"instances": manifest}, mf, indent=2)
+
+                zip_fd, zip_path = tempfile.mkstemp(suffix=".zip")
+                os.close(zip_fd)
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for file_path in temp_dir.iterdir():
+                        zf.write(file_path, arcname=file_path.name)
+                segmentation_zip = zip_path
+
+            return result_image, info, output_path, detection_rows, segmentation_zip
         else:
             return (
                 image,
                 "⚠️ No objects detected. Try adjusting prompts or lowering the confidence threshold.",
                 None,
+                [],
+                None,
             )
 
     except Exception as e:
-        return None, f"❌ Processing failed: {str(e)}", None
+        return None, f"❌ Processing failed: {str(e)}", None, [], None
 
 
 def create_demo():
     """Create the Gradio demo interface."""
 
     custom_css = """
-    .container { max-width: 1800px; width: 90%; margin: auto; padding-top: 20px; }
+    .container { max-width: 1800px; width: 95%; margin: auto; padding-top: 20px; }
     .gradio-container { max-width: unset; }
     h1 { text-align: center; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2d3748; margin-bottom: 10px; }
     .description { text-align: center; font-size: 1.1em; color: #4a5568; margin-bottom: 30px; }
     .gr-button-primary { background: linear-gradient(90deg, #4b6cb7 0%, #182848 100%); border: none; }
     .gr-box { border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     #interaction-info { font-weight: bold; color: #2b6cb0; text-align: center; background-color: #ebf8ff; padding: 10px; border-radius: 5px; border: 1px solid #bee3f8; }
+    .main-row { gap: 16px; align-items: stretch; }
+    .control-card { background: #0f172a0d; border-radius: 12px; padding: 16px; border: 1px solid #e2e8f0; }
+    .seg-card { background: white; border-radius: 12px; padding: 12px; border: 1px solid #e2e8f0; }
+    .accordion-compact .gr-panel { padding: 8px 12px; }
     .mode-radio .wrap { display: flex; width: 100%; gap: 10px; }
     .mode-radio .wrap label { flex: 1; justify-content: center; text-align: center; }
     """
@@ -299,8 +367,9 @@ def create_demo():
 
             with gr.Tabs():
                 with gr.TabItem("🖼️ Image Segmentation", id="tab_image"):
-                    with gr.Row():
-                        with gr.Column(scale=1):
+                    with gr.Row(elem_classes="main-row"):
+                        with gr.Column(scale=0.95, elem_classes="control-card"):
+                            gr.Markdown("### Upload & prompts")
                             image_input = gr.Image(
                                 type="numpy",
                                 label="Source image (click to add prompts)",
@@ -310,26 +379,24 @@ def create_demo():
                             original_image_state = gr.State(None)
                             click_state = gr.State(None)
 
-                            with gr.Group():
-                                gr.Markdown("### 🎮 Interaction mode")
+                            with gr.Accordion(
+                                "🎛️ Prompt & threshold settings", open=False, elem_classes="accordion-compact"
+                            ):
                                 interaction_mode = gr.Radio(
                                     choices=["📍 Point Prompt", "🔲 Box Prompt"],
                                     value="📍 Point Prompt",
-                                    label="Select mode",
-                                    show_label=False,
+                                    label="Interaction mode",
                                     elem_classes="mode-radio",
                                 )
-                                with gr.Row():
-                                    clear_prompts_btn = gr.Button(
-                                        "🗑️ Clear prompts", size="sm", variant="secondary"
-                                    )
-
-                                interaction_info = gr.Markdown(
-                                    "👆 Click the image to add points or box corners.",
-                                    elem_id="interaction-info",
+                                confidence_threshold = gr.Slider(
+                                    minimum=0.0,
+                                    maximum=1.0,
+                                    value=0.4,
+                                    step=0.05,
+                                    label="🎯 Confidence threshold",
                                 )
 
-                            with gr.Accordion("📝 Advanced prompt options", open=True):
+                            with gr.Accordion("📝 Advanced prompt options", open=False):
                                 text_prompt = gr.Textbox(
                                     label="Text prompt",
                                     placeholder="Describe what to segment, e.g., 'a red car' or 'a cat'",
@@ -337,7 +404,6 @@ def create_demo():
                                 )
 
                                 with gr.Row():
-                                    gr.Markdown("Quick fill examples:")
                                     example_text_btn = gr.Button("🐱 Cat", size="sm")
                                     example_point_btn = gr.Button("📍 Sample point", size="sm")
 
@@ -345,21 +411,36 @@ def create_demo():
                                     point_prompt = gr.Textbox(label="Point coordinates")
                                     box_prompt = gr.Textbox(label="Box coordinates")
 
-                            confidence_threshold = gr.Slider(
-                                minimum=0.0,
-                                maximum=1.0,
-                                value=0.4,
-                                step=0.05,
-                                label="🎯 Confidence threshold",
+                            with gr.Row():
+                                segment_button = gr.Button(
+                                    "🚀 Run segmentation", variant="primary", size="lg"
+                                )
+                                clear_prompts_btn = gr.Button(
+                                    "🗑️ Reset", size="sm", variant="secondary"
+                                )
+
+                            interaction_info = gr.Markdown(
+                                "👆 Click the image to add points or box corners.",
+                                elem_id="interaction-info",
                             )
 
-                            segment_button = gr.Button(
-                                "🚀 Run segmentation", variant="primary", size="lg"
-                            )
+                            with gr.Accordion("📦 Detected objects", open=True):
+                                detected_objects = gr.Dataframe(
+                                    headers=["ID", "Name", "Confidence", "Box (x1,y1,x2,y2)"],
+                                    value=[],
+                                )
 
-                        with gr.Column(scale=1.5):
-                            image_output = gr.Image(type="numpy", label="✨ Segmentation preview")
-                            download_output = gr.File(label="Download segmentation")
+                            with gr.Accordion("📥 Downloads", open=True):
+                                download_output = gr.File(label="Segmentation preview (PNG)")
+                                segmentation_package = gr.File(
+                                    label="Segmentation package (ZIP of masks)",
+                                    file_types=[".zip"],
+                                )
+
+                        with gr.Column(scale=1.55, elem_classes="seg-card"):
+                            image_output = gr.Image(
+                                type="numpy", label="✨ Segmentation preview", height=650
+                            )
                             image_info = gr.Textbox(
                                 label="📊 Result summary", interactive=False, lines=2
                             )
@@ -413,7 +494,13 @@ def create_demo():
                             box_prompt,
                             original_image_state,
                         ],
-                        outputs=[image_output, image_info, download_output],
+                        outputs=[
+                            image_output,
+                            image_info,
+                            download_output,
+                            detected_objects,
+                            segmentation_package,
+                        ],
                     )
 
                     example_text_btn.click(fn=lambda: "a cat", outputs=[text_prompt])
