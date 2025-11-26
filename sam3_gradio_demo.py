@@ -19,6 +19,17 @@ import torch
 from PIL import Image
 import importlib.util
 
+COLOR_PALETTE = [
+    (244, 67, 54),
+    (33, 150, 243),
+    (76, 175, 80),
+    (255, 193, 7),
+    (156, 39, 176),
+    (0, 188, 212),
+    (255, 87, 34),
+    (63, 81, 181),
+]
+
 # Add current directory to Python path so sam3 modules can be imported
 current_dir = Path(__file__).parent
 sys.path.insert(0, str(current_dir))
@@ -32,12 +43,10 @@ sam3_available = (
 if sam3_available:
     from sam3.model_builder import build_sam3_image_model
     from sam3.model.sam3_image_processor import Sam3Processor
-    from sam3.visualization_utils import plot_results
 else:
     print("SAM3 dependencies are missing; running in docs-only mode.")
     Sam3Processor = None  # type: ignore
     build_sam3_image_model = None  # type: ignore
-    plot_results = None  # type: ignore
 
 # Global variables
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -86,15 +95,22 @@ def initialize_models():
 image_predictor = initialize_models()
 
 
-def handle_image_click(img, original_img, evt: gr.SelectData, mode, current_points, current_boxes, click_state):
+def handle_image_click(
+    img,
+    original_img,
+    detections_state,
+    evt: gr.SelectData,
+    mode,
+    current_points,
+    current_boxes,
+    click_state,
+):
     """Handle click events on the image and provide real-time visual feedback."""
     if img is None:
         return img, current_points, current_boxes, click_state, "Please upload an image first."
 
-    if original_img is None:
-        original_img = img.copy()
-
-    vis_img = img.copy()
+    base = render_overlays(original_img or img, detections_state or [])
+    vis_img = np.array(base) if base is not None else (original_img or img).copy()
 
     x, y = evt.index
     x, y = int(x), int(y)
@@ -251,20 +267,17 @@ def segment_image(
         progress(0.7, desc="Running inference...")
 
         if "boxes" in state and len(state["boxes"]) > 0:
-            import matplotlib.pyplot as plt
+            scores = state["scores"].detach().cpu().numpy()
+            boxes_np = state["boxes"].detach().cpu().numpy()
+            masks = state.get("masks")
+            masks_np = masks.detach().cpu().numpy() if masks is not None else None
 
-            plot_results(image, state)
-
-            buf = io.BytesIO()
-            plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
-            buf.seek(0)
-            result_image = Image.open(buf)
-            plt.close()  # Close figure to release memory
-
-            processing_time = time.time() - start_time
-            info = (
-                f"✨ Segmentation complete | Time: {processing_time:.2f}s | "
-                f"Detections: {len(state['boxes'])}"
+            return (
+                image,
+                boxes_np,
+                masks_np,
+                scores,
+                time.time() - start_time,
             )
 
             fd, output_path = tempfile.mkstemp(suffix=".png")
@@ -321,7 +334,6 @@ def segment_image(
         else:
             return (
                 image,
-                "⚠️ No objects detected. Try adjusting prompts or lowering the confidence threshold.",
                 None,
                 [],
                 None,
@@ -372,8 +384,17 @@ def create_demo():
                             gr.Markdown("### Upload & prompts")
                             image_input = gr.Image(
                                 type="numpy",
-                                label="Source image (click to add prompts)",
+                                label="Upload, click to prompt, and view results",
                                 elem_id="input_image",
+                                interactive=True,
+                                height=650,
+                            )
+                            interaction_info = gr.Markdown(
+                                "👆 點擊圖片加入 point 或 box，再按下 segment 以覆蓋顯示。",
+                                elem_id="interaction-info",
+                            )
+                            image_info = gr.Textbox(
+                                label="📊 Result summary", interactive=False, lines=2
                             )
 
                             original_image_state = gr.State(None)
@@ -446,53 +467,315 @@ def create_demo():
                             )
 
                     def store_original_image(img):
-                        return img, None
+                        if img is None:
+                            return (
+                                None,
+                                None,
+                                [],
+                                1,
+                                "",
+                                "",
+                                None,
+                                "Upload an image to begin.",
+                                [],
+                                gr.Dropdown.update(choices=[], value=None),
+                                None,
+                                None,
+                                "",
+                            )
 
-                    image_input.upload(
+                        return (
+                            img,
+                            img,
+                            [],
+                            1,
+                            "",
+                            "",
+                            None,
+                            "Image loaded. Add prompts, then press segment to render.",
+                            [],
+                            gr.Dropdown.update(choices=[], value=None),
+                            None,
+                            None,
+                            "",
+                        )
+
+                    image_canvas.upload(
                         fn=store_original_image,
-                        inputs=[image_input],
-                        outputs=[original_image_state, click_state],
+                        inputs=[image_canvas],
+                        outputs=[
+                            image_canvas,
+                            original_image_state,
+                            detections_state,
+                            next_id_state,
+                            point_prompt,
+                            box_prompt,
+                            click_state,
+                            interaction_info,
+                            detected_objects,
+                            detection_selector,
+                            segmentation_package,
+                            download_output,
+                            image_info,
+                        ],
                     )
 
-                    image_input.select(
+                    image_canvas.select(
                         fn=handle_image_click,
                         inputs=[
-                            image_input,
+                            image_canvas,
                             original_image_state,
+                            detections_state,
                             interaction_mode,
                             point_prompt,
                             box_prompt,
                             click_state,
                         ],
-                        outputs=[image_input, point_prompt, box_prompt, click_state, interaction_info],
+                        outputs=[image_canvas, point_prompt, box_prompt, click_state, interaction_info],
                     )
 
-                    def clear_prompts(orig_img):
+                    def reset_all(orig_img):
                         if orig_img is None:
-                            return None, "", "", None, "Upload an image to begin."
+                            return (
+                                None,
+                                orig_img,
+                                [],
+                                1,
+                                "",
+                                "",
+                                None,
+                                "Upload an image to begin.",
+                                [],
+                                gr.Dropdown.update(choices=[], value=None),
+                                None,
+                                None,
+                                "",
+                            )
+
                         return (
                             orig_img,
+                            orig_img,
+                            [],
+                            1,
                             "",
                             "",
                             None,
-                            "♻️ Prompts cleared and view reset to the original image.",
+                            "♻️ Reset complete. Prompts and detections cleared.",
+                            [],
+                            gr.Dropdown.update(choices=[], value=None),
+                            None,
+                            None,
+                            "",
                         )
 
                     clear_prompts_btn.click(
-                        fn=clear_prompts,
+                        fn=reset_all,
                         inputs=[original_image_state],
-                        outputs=[image_input, point_prompt, box_prompt, click_state, interaction_info],
+                        outputs=[
+                            image_canvas,
+                            original_image_state,
+                            detections_state,
+                            next_id_state,
+                            point_prompt,
+                            box_prompt,
+                            click_state,
+                            interaction_info,
+                            detected_objects,
+                            detection_selector,
+                            segmentation_package,
+                            download_output,
+                            image_info,
+                        ],
                     )
 
+                    def run_segmentation(
+                        img,
+                        text_prompt,
+                        confidence_threshold,
+                        point_prompt,
+                        box_prompt,
+                        original_img,
+                        detections,
+                        next_id,
+                    ):
+                        base_image = original_img if original_img is not None else img
+                        if base_image is None:
+                            return (
+                                img,
+                                original_img,
+                                detections,
+                                next_id,
+                                point_prompt,
+                                box_prompt,
+                                None,
+                                "Please upload an image first.",
+                                build_detection_rows(detections),
+                                gr.Dropdown.update(choices=[d.get("id") for d in detections], value=None),
+                                build_segmentation_package(detections),
+                                None,
+                                "",
+                            )
+
+                        result_image, boxes_np, masks_np, scores, elapsed = segment_image(
+                            base_image,
+                            text_prompt,
+                            confidence_threshold,
+                            point_prompt,
+                            box_prompt,
+                            original_img,
+                        )
+
+                        if boxes_np is None or scores is None:
+                            overlay = render_overlays(base_image, detections)
+                            return (
+                                overlay,
+                                original_img,
+                                detections,
+                                next_id,
+                                "",
+                                "",
+                                None,
+                                "⚠️ No objects detected. Adjust prompts or threshold.",
+                                build_detection_rows(detections),
+                                gr.Dropdown.update(choices=[d.get("id") for d in detections], value=None),
+                                build_segmentation_package(detections),
+                                None,
+                                "",
+                            )
+
+                        new_detections = list(detections)
+                        for idx, (box, score) in enumerate(zip(boxes_np, scores)):
+                            mask = None
+                            if masks_np is not None and len(masks_np) > idx:
+                                mask = masks_np[idx].squeeze() > 0.5
+
+                            label = text_prompt or f"Object {next_id}"
+                            color = COLOR_PALETTE[(next_id - 1) % len(COLOR_PALETTE)]
+                            new_detections.append(
+                                {
+                                    "id": next_id,
+                                    "label": label,
+                                    "score": float(score),
+                                    "box": [float(x) for x in box.tolist()],
+                                    "mask": mask,
+                                    "color": color,
+                                }
+                            )
+                            next_id += 1
+
+                        overlay = render_overlays(base_image, new_detections)
+
+                        fd, output_path = tempfile.mkstemp(suffix=".png")
+                        os.close(fd)
+                        if overlay is not None:
+                            Image.fromarray(np.array(overlay)).save(output_path)
+                        else:
+                            output_path = None
+
+                        info_msg = (
+                            f"✨ Segmentation complete. Added {len(new_detections) - len(detections)} "
+                            f"object(s). Total: {len(new_detections)} | Time: {elapsed:.2f}s"
+                        )
+
+                        selector_update = gr.Dropdown.update(
+                            choices=[det.get("id") for det in new_detections], value=None
+                        )
+
+                        return (
+                            overlay,
+                            original_img,
+                            new_detections,
+                            next_id,
+                            "",
+                            "",
+                            None,
+                            info_msg,
+                            build_detection_rows(new_detections),
+                            selector_update,
+                            build_segmentation_package(new_detections),
+                            output_path,
+                            info_msg,
+                        )
+
                     segment_button.click(
-                        fn=segment_image,
+                        fn=run_segmentation,
                         inputs=[
-                            image_input,
+                            image_canvas,
                             text_prompt,
                             confidence_threshold,
                             point_prompt,
                             box_prompt,
                             original_image_state,
+                            detections_state,
+                            next_id_state,
+                        ],
+                        outputs=[
+                            image_canvas,
+                            original_image_state,
+                            detections_state,
+                            next_id_state,
+                            point_prompt,
+                            box_prompt,
+                            click_state,
+                            interaction_info,
+                            detected_objects,
+                            detection_selector,
+                            segmentation_package,
+                            download_output,
+                            image_info,
+                        ],
+                    )
+
+                    def delete_detection(det_id, original_img, detections):
+                        if not det_id:
+                            return (
+                                render_overlays(original_img, detections),
+                                original_img,
+                                detections,
+                                gr.Dropdown.update(choices=[d.get("id") for d in detections], value=None),
+                                build_detection_rows(detections),
+                                build_segmentation_package(detections),
+                                None,
+                                "Select an ID to delete.",
+                            )
+
+                        remaining = [d for d in detections if str(d.get("id")) != str(det_id)]
+                        overlay = render_overlays(original_img, remaining)
+
+                        fd, output_path = tempfile.mkstemp(suffix=".png")
+                        os.close(fd)
+                        if overlay is not None:
+                            Image.fromarray(np.array(overlay)).save(output_path)
+                        else:
+                            output_path = None
+
+                        selector_update = gr.Dropdown.update(
+                            choices=[d.get("id") for d in remaining], value=None
+                        )
+
+                        return (
+                            overlay,
+                            original_img,
+                            remaining,
+                            selector_update,
+                            build_detection_rows(remaining),
+                            build_segmentation_package(remaining),
+                            output_path,
+                            f"Detection {det_id} removed.",
+                        )
+
+                    delete_detection_btn.click(
+                        fn=delete_detection,
+                        inputs=[detection_selector, original_image_state, detections_state],
+                        outputs=[
+                            image_canvas,
+                            original_image_state,
+                            detections_state,
+                            detection_selector,
+                            detected_objects,
+                            segmentation_package,
+                            download_output,
+                            interaction_info,
                         ],
                         outputs=[
                             image_output,
