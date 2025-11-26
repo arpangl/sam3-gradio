@@ -271,7 +271,7 @@ def create_demo():
     """Create the Gradio demo interface."""
 
     custom_css = """
-    .container { max-width: 1500px; width: 95%; margin: auto; padding-top: 20px; }
+    .container { max-width: 1800px; width: 90%; margin: auto; padding-top: 20px; }
     .gradio-container { max-width: unset; }
     h1 { text-align: center; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2d3748; margin-bottom: 10px; }
     .description { text-align: center; font-size: 1.1em; color: #4a5568; margin-bottom: 30px; }
@@ -445,6 +445,7 @@ def main():
 
     print("🚀 Launching SAM3 Interactive Vision Studio...")
     demo = create_demo()
+    demo.queue()
     demo.launch(
         server_name="0.0.0.0",
         server_port=7890,
