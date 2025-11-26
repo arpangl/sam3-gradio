@@ -398,6 +398,8 @@ def create_demo():
                             )
 
                             original_image_state = gr.State(None)
+                            detections_state = gr.State([])
+                            next_id_state = gr.State(1)
                             click_state = gr.State(None)
 
                             with gr.Accordion(
@@ -450,6 +452,16 @@ def create_demo():
                                     headers=["ID", "Name", "Confidence", "Box (x1,y1,x2,y2)"],
                                     value=[],
                                 )
+                                with gr.Row():
+                                    detection_selector = gr.Dropdown(
+                                        label="Select ID to delete",
+                                        choices=[],
+                                        value=None,
+                                        scale=1,
+                                    )
+                                    delete_detection_btn = gr.Button(
+                                        "🗑️ Delete selected", variant="stop", size="sm", scale=1
+                                    )
 
                             with gr.Accordion("📥 Downloads", open=True):
                                 download_output = gr.File(label="Segmentation preview (PNG)")
