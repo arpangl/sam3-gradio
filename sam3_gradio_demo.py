@@ -382,7 +382,7 @@ def create_demo():
                     with gr.Row(elem_classes="main-row"):
                         with gr.Column(scale=0.95, elem_classes="control-card"):
                             gr.Markdown("### Upload & prompts")
-                            image_input = gr.Image(
+                            image_canvas = gr.Image(
                                 type="numpy",
                                 label="Upload, click to prompt, and view results",
                                 elem_id="input_image",
