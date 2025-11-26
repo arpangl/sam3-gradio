@@ -161,16 +161,16 @@ def segment_image(
     """图像分割功能"""
     # 优先使用原始图像，如果不存在则使用输入图像
     image_to_process = original_image if original_image is not None else input_image
-    
+
     if image_to_process is None:
-        return None, "请上传图像"
-        
+        return None, None, None, "请上传图像"
+
     if not text_prompt and not point_prompt and not box_prompt:
-        return None, "请提供至少一种提示（文本、点或框）"
-    
+        return None, None, None, "请提供至少一种提示（文本、点或框）"
+
     try:
         if image_predictor is None:
-            return None, "模型未初始化，请检查模型文件"
+            return None, None, None, "模型未初始化，请检查模型文件"
             
         start_time = time.time()
         progress(0.1, desc="正在加载图像...")
@@ -246,28 +246,43 @@ def segment_image(
         if "boxes" in state and len(state["boxes"]) > 0:
             # 可视化结果
             import matplotlib.pyplot as plt
-            
+
             # 使用官方的 plot_results 接口进行绘制
             # plot_results 内部会创建 figure 并绘制 masks, boxes, scores
             # 注意：它会打印找到的对象数量，但这不影响 Gradio 显示
             plot_results(image, state)
-            
+
             # 获取当前的 figure (由 plot_results 创建) 并转换为 PIL 图像
             buf = io.BytesIO()
             plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
             buf.seek(0)
             result_image = Image.open(buf)
             plt.close() # 关闭 figure 释放内存
-            
+
+            # 保存可视化结果到临时文件，便于下载
+            vis_fd, vis_path = tempfile.mkstemp(suffix=".png")
+            os.close(vis_fd)
+            result_image.save(vis_path)
+
+            # 保存原始掩码到临时文件
+            mask_download_path = None
+            if "masks" in state:
+                masks_tensor = state["masks"]
+                masks_np = masks_tensor.cpu().numpy()
+                mask_fd, mask_path = tempfile.mkstemp(suffix=".npz")
+                os.close(mask_fd)
+                np.savez_compressed(mask_path, masks=masks_np)
+                mask_download_path = mask_path
+
             processing_time = time.time() - start_time
             info = f"✨ 处理完成 | 耗时: {processing_time:.2f}s | 检测到 {len(state['boxes'])} 个目标"
-            
-            return result_image, info
+
+            return result_image, vis_path, mask_download_path, info
         else:
-            return image, "⚠️ 未检测到任何对象，请尝试调整提示或降低置信度阈值"
-            
+            return image, None, None, "⚠️ 未检测到任何对象，请尝试调整提示或降低置信度阈值"
+
     except Exception as e:
-        return None, f"❌ 处理失败: {str(e)}"
+        return None, None, None, f"❌ 处理失败: {str(e)}"
 def convert_output_format(outputs):
     """转换模型输出格式以适配可视化函数"""
     if not outputs: return {}
@@ -501,6 +516,9 @@ def create_demo():
                         # 右侧结果栏
                         with gr.Column(scale=1):
                             image_output = gr.Image(type="numpy", label="✨ 分割结果")
+                            with gr.Row():
+                                mask_vis_download = gr.File(label="📥 下载可视化结果", interactive=False)
+                                mask_raw_download = gr.File(label="📥 下载原始掩码", interactive=False)
                             image_info = gr.Textbox(label="📊 分析报告", interactive=False, lines=2)
                     
                     # 事件绑定
@@ -530,7 +548,7 @@ def create_demo():
                     segment_button.click(
                         fn=segment_image,
                         inputs=[image_input, text_prompt, confidence_threshold, point_prompt, box_prompt, original_image_state],
-                        outputs=[image_output, image_info]
+                        outputs=[image_output, mask_vis_download, mask_raw_download, image_info]
                     )
                     
                     # 5. 示例按钮
